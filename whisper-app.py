@@ -132,6 +132,13 @@ def configure_torch_runtime() -> None:
         torch.set_num_threads(threads)
 
 
+def resolve_default_language() -> str:
+    env_lang = os.getenv("WHISPER_LANGUAGE", "").strip().lower()
+    if not env_lang or env_lang == "auto":
+        return "auto"
+    return env_lang if env_lang in LANGUAGES else "auto"
+
+
 def load_model(model_size: str, device: str) -> whisper.Whisper:
     global _MODEL_CACHE, _MODEL_CACHE_KEY
     cache_key = (model_size, device)
@@ -235,6 +242,7 @@ model_choices = resolve_model_choices()
 default_model = resolve_default_model(model_choices)
 default_model_index = model_choices.index(default_model)
 device = resolve_device()
+default_language = resolve_default_language()
 
 redis_client, redis_status = get_redis_client()
 cache_enabled = False
@@ -251,10 +259,15 @@ with st.sidebar:
     task = st.selectbox("Task", ["transcribe", "translate"], index=0)
 
     language_codes = ["auto"] + sorted(LANGUAGES.keys())
+    default_language_index = (
+        language_codes.index(default_language)
+        if default_language in language_codes
+        else 0
+    )
     language_code = st.selectbox(
         "Language",
         language_codes,
-        index=0,
+        index=default_language_index,
         format_func=lambda code: "Auto-detect"
         if code == "auto"
         else LANGUAGES[code].title(),
