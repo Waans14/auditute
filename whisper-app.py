@@ -1,5 +1,7 @@
 
+import gc
 import streamlit as st
+import torch
 import whisper
 from whisper.tokenizer import LANGUAGES
 import hashlib
@@ -87,9 +89,63 @@ def ensure_ffmpeg_available() -> None:
         st.stop()
 
 
-@st.cache_resource(show_spinner=False)
-def load_model(model_size: str) -> whisper.Whisper:
-    return whisper.load_model(model_size)
+MODEL_CHOICES = ["tiny", "base", "small", "medium", "large"]
+_MODEL_CACHE: Optional[whisper.Whisper] = None
+_MODEL_CACHE_KEY: Optional[tuple[str, str]] = None
+
+
+def resolve_model_choices() -> list[str]:
+    env_value = os.getenv("WHISPER_MODELS", "").strip()
+    if env_value:
+        requested = [item.strip() for item in env_value.split(",") if item.strip()]
+        filtered = [item for item in requested if item in MODEL_CHOICES]
+        if filtered:
+            return filtered
+    return ["tiny", "base"]
+
+
+def resolve_default_model(choices: list[str]) -> str:
+    env_default = os.getenv("WHISPER_DEFAULT_MODEL", "").strip()
+    if env_default in choices:
+        return env_default
+    return choices[0]
+
+
+def resolve_device() -> str:
+    env_device = os.getenv("WHISPER_DEVICE", "").strip().lower()
+    if env_device in {"cpu", "cuda"}:
+        if env_device == "cuda" and not torch.cuda.is_available():
+            return "cpu"
+        return env_device
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def configure_torch_runtime() -> None:
+    thread_value = os.getenv("TORCH_NUM_THREADS", "").strip()
+    if not thread_value:
+        return
+    try:
+        threads = int(thread_value)
+    except ValueError:
+        return
+    if threads > 0:
+        torch.set_num_threads(threads)
+
+
+def load_model(model_size: str, device: str) -> whisper.Whisper:
+    global _MODEL_CACHE, _MODEL_CACHE_KEY
+    cache_key = (model_size, device)
+    if _MODEL_CACHE is not None and _MODEL_CACHE_KEY == cache_key:
+        return _MODEL_CACHE
+    _MODEL_CACHE = None
+    _MODEL_CACHE_KEY = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    model = whisper.load_model(model_size, device=device)
+    _MODEL_CACHE = model
+    _MODEL_CACHE_KEY = cache_key
+    return model
 
 
 def format_timestamp(seconds: float) -> str:
@@ -174,6 +230,12 @@ def store_cached_transcription(client: Redis, cache_key: str, data: dict) -> Non
         client.set(cache_key, payload)
 
 
+configure_torch_runtime()
+model_choices = resolve_model_choices()
+default_model = resolve_default_model(model_choices)
+default_model_index = model_choices.index(default_model)
+device = resolve_device()
+
 redis_client, redis_status = get_redis_client()
 cache_enabled = False
 
@@ -182,8 +244,8 @@ with st.sidebar:
     st.header("Settings")
     model_size = st.selectbox(
         "Model",
-        ["tiny", "base", "small", "medium", "large"],
-        index=1,
+        model_choices,
+        index=default_model_index,
         help="Larger models are more accurate but slower.",
     )
     task = st.selectbox("Task", ["transcribe", "translate"], index=0)
@@ -204,6 +266,7 @@ with st.sidebar:
         value=False,
         help="Enable on GPU for speed. Keep off on CPU to avoid warnings.",
     )
+    st.caption(f"Device: {device.upper()}")
 
     st.divider()
     st.markdown("**Tips**")
@@ -254,7 +317,7 @@ with right:
         - Downloadable text output
         """
     )
-    st.info("Set the model to *base* for a good speed/accuracy balance.")
+    st.info("Use tiny/base on Railway. Larger models may exceed memory limits.")
 
 if clear_clicked:
     st.session_state.pop("transcription", None)
@@ -265,6 +328,10 @@ if transcribe_clicked:
         st.error("Please upload an audio file before transcribing.")
     else:
         audio_bytes = audio_file.read()
+        if use_fp16 and device != "cuda":
+            st.warning("FP16 disabled because no GPU is available.")
+            use_fp16 = False
+
         transcribe_options = {
             "task": task,
             "fp16": use_fp16,
@@ -293,7 +360,7 @@ if transcribe_clicked:
 
             try:
                 with st.spinner("Transcribing... this may take a few minutes."):
-                    model = load_model(model_size)
+                    model = load_model(model_size, device)
                     transcription = model.transcribe(audio_file_path, **transcribe_options)
 
                 st.session_state["transcription"] = transcription
