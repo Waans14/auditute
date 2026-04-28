@@ -33,6 +33,19 @@ pip install -r requirements.txt
   - Add an environment variable `NIXPACKS_PKGS=ffmpeg` if you use Nixpacks.
   - Or install ffmpeg in a Dockerfile if you deploy with Docker.
 
+### Railway memory-safe settings
+
+If your app hits an Out Of Memory error on Railway, limit the available models and keep the default small.
+
+Recommended environment variables:
+
+- `WHISPER_MODELS=tiny,base`
+- `WHISPER_DEFAULT_MODEL=tiny`
+- `WHISPER_DEVICE=cpu`
+- Optional: `TORCH_NUM_THREADS=1`
+
+If memory allows, you can switch the default model to `base` for better accuracy.
+
 ## Deploy on Railway (Docker + Redis)
 
 1. Create a new Railway project and connect this repository.
